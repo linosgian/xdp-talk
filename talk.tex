@@ -1,0 +1,326 @@
+\documentclass{beamer}
+\usepackage[T1]{fontenc}
+\usepackage{alltt}
+\usepackage{listings}
+\usepackage{graphicx}
+\makeatletter
+\def\verbatim@font{\footnotesize\ttfamily}
+\makeatother
+\newcommand{\credit}[1]{\par\hfill \tiny Credit:~\itshape#1}
+
+
+\usetheme{Warsaw}
+\title[XDP]{How to build a DDoS Mitigation Pipeline using XDP}
+\author{Linos Giannopoulos}
+\date{December 20, 2018}
+\begin{document}
+
+\begin{frame}
+\titlepage
+\end{frame}
+
+\begin{frame}{Agenda}
+  \begin{itemize}
+    \item cBPF
+    \item eBPF
+    \item XDP
+    \item DDoS Mitigation Pipeline
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{cBPF}
+Berkeley Packet Filter
+\begin{itemize}
+\item \textit{The BSD Packet Filter: A New Architecture for User-level Packet Capture}
+\item Avoid context switches between kernel and user space
+\item Filter packets as early as possible
+\end{itemize}
+\end{frame}
+
+\begin{frame}[fragile]
+  \frametitle{cBPF}
+  \begin{verbatim}
+# lgian[~] tcpdump -i eth1 ip and udp -d
+(000) ldh      [12]
+(001) jeq      #0x800      jt 2 jf 5
+(002) ldb      [23]
+(003) jeq      #0x11       jt 4 jf 5
+(004) ret      #262144
+(005) ret      #0
+
+# lgian[~] strace -e trace=setsockopt tcpdump -i any tcp
+...
+setsockopt(3, SOL_SOCKET, SO_ATTACH_FILTER,
+  {len=1, filter=0x7f0264d65000}, 16) = 0
+setsockopt(3, SOL_SOCKET, SO_ATTACH_FILTER,
+  {len=12, filter=0x55e81a792dd0}, 16) = 0
+  \end{verbatim}
+\end{frame}
+
+\begin{frame}{eBPF}
+  What changed
+  \begin{itemize}
+    \item Extended ISA for modern CPUs
+    \item More registers (from 2 to 10)
+    \item JIT compiler bytecode to native code
+  \end{itemize}
+
+  New concepts
+  \begin{itemize}
+    \item eBPF Maps shared between user and kernel space
+    \item eBPF Verifier
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{eBPF Verifier}
+  We essentially run userspace programs in the kernel. 
+  \break
+
+  How can we ensure an eBPF program won't cause a kernel panic or read/write arbitrary kernel memory?
+  \break
+
+  \pause
+
+  Restrictions:
+
+  \begin{itemize}
+  \item 4096 instructions per program
+  \item No loops
+  \item No unreachable instructions
+  \item Cannot read uninitialized registers
+  \item Cannot read any arbitrary memory
+  \item No out-of-bounds jumps
+  \item etc.
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{eBPF}
+  Some use cases:
+  \begin{itemize}
+    \item Tracing (kprobes/uprobes/tracepoints)\footnotemark
+    \item Networking (tc/XDP)
+    \item Security (seccomp/IDS/DDoS)
+  \end{itemize}
+  \footnotetext[1]{\url{https://www.youtube.com/watch?v=w8nFRoFJ6EQ}}
+\end{frame}
+
+% \begin{frame}[fragile]
+%   \frametitle{eBPF Map Types}
+%   \begin{itemize}
+%     \item BPF\_MAP\_TYPE\_HASH: a hash table
+%     \item BPF\_MAP\_TYPE\_ARRAY: an array map, optimized for fast lookup speeds, often used for counters
+%     \item BPF\_MAP\_TYPE\_PERCPU\_ARRAY: a per-CPU array, used to implement histograms of latency
+%     \item BPF\_MAP\_TYPE\_PERCPU\_HASH: a per-CPU hash table
+%   \end{itemize}
+% \end{frame}
+
+\begin{frame}{XDP}
+  eXpress Data Path
+  \begin{itemize}
+    \item High-performance packet processing
+    \item Runs eBPF programs at the earliest possible* point (sk\_buffer metadata structure)
+    \item In concert with the kernel (no userspace bypass or out-of-tree kernel modifications)
+    \item Driver dependant (only several NIC drivers support it)
+    \item Verdicts: aborted, drop, pass, tx
+  \end{itemize}
+
+  Use cases:
+  \begin{itemize}
+    \item Firewalling (Cillium\footnotemark[1])
+    \item DDoS
+    \item Load balancing (Katran\footnotemark[2])
+    \item Monitoring
+  \end{itemize}
+  \footnotetext[1]{\tiny\url{https://cilium.io/}}
+  \footnotetext[2]{\tiny\url{https://code.fb.com/open-source/open-sourcing-katran-a-scalable-network-load-balancer/}}
+\end{frame}
+
+\begin{frame}[fragile]
+  \frametitle{XDP Example}
+  \begin{verbatim}
+    #include <linux/bpf.h>
+    #include <linux/if_ether.h>
+    #include <linux/ip.h>
+    #define SEC(NAME) __attribute__((section(NAME), used))
+
+    SEC("dropper")
+    int xdp(struct xdp_md *ctx)
+    {
+        void *data = (void *)(long)ctx->data;
+        void *data_end = (void *)(long)ctx->data_end;
+        struct iphdr *ip = data + sizeof(struct ethhdr);
+
+        // +1 is sizeof(struct iphdr)
+        if (ip + 1 > data_end)
+            return XDP_ABORTED;
+
+        if(ip->saddr == 59017107){ // Binary format of "147.135.132.3"
+            return XDP_DROP;
+        }
+        return XDP_PASS;
+    }
+  \end{verbatim}
+\end{frame}
+
+\begin{frame}{XDP Load Program}
+  \begin{figure}
+    \includegraphics[width=0.85\textwidth]{./xdp_workflow.png}
+  \end{figure}
+\end{frame}
+
+\begin{frame}{XDP Load Program}
+  \begin{itemize}
+    \item Write C Program
+    \item clang -O2 -target bpf -c xdp.c -o xdp.o
+    \item ip link set dev eth0 xdpgeneric obj xdp.o sec <section-name>
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{XDP vs Everything}
+  \Large{What about IPtables?}
+\end{frame}
+
+\begin{frame}{XDP vs Everything}
+  Test bench
+  \begin{itemize}
+    \item 10GbE Intel NIC
+    \item 14Mpps tiny UDP packets 
+    \item Traffic is directed towards a single CPU
+    \item Measure number of packets handled by the kernel on that CPU
+    \item Randomized source IP/Port
+  \end{itemize}
+
+  \ \\
+  \pause
+  \textbf{\textit{How fast can we drop packets?}}
+\end{frame}
+
+\begin{frame}{XDP vs Everything}
+  \begin{figure}
+    \includegraphics[width=1.1\textwidth]{./no_xdp.png}
+  \end{figure}
+\end{frame}
+
+\begin{frame}{XDP vs Everything}
+  \begin{figure}
+    \includegraphics[width=1.1\textwidth]{./with_xdp.png}
+  \end{figure}
+\end{frame}
+
+\begin{frame}{Overview of Pipeline}
+  \begin{itemize}
+    \item Traffic sampling
+    \item Traffic aggregation and analysis
+    \item Attack reaction
+    \item Attack mitigation
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Traffic sampling}
+  In contrast with an IDS, sampling instead of working on the whole traffic is crucial here.
+  \begin{itemize}
+    \item Some improvements are suggested in this area, but nothing concrete
+    \item Use \textit{NFLOG}
+    \item Userspace daemon and Sflow packets to central server
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Traffic aggregation and analysis}
+  How do we categorize traffic?
+  \pause
+  \begin{figure}
+    \includegraphics[width=\linewidth]{./p0f.jpg}
+    \credit{https://www.slideshare.net/InfoQ/xdp-in-practice-ddos-mitigation-cloudflare}
+  \end{figure}
+\end{frame}
+
+\begin{frame}{Traffic aggregation and analysis}
+  Traffic aggregated into groups
+  \begin{itemize}
+    \item TCP SYNs, TCP ACKs, UDP/DNS
+    \item Destination IP/Port
+    \item Known attack vectors and other heuristics
+  \end{itemize}
+\end{frame}
+
+\begin{frame}[fragile]
+\frametitle{p0f -> XDP}
+\begin{verbatim}
+
+static inline int match_p0f(void *data, void *data_end) {
+    struct ethhdr *eth_hdr;
+    struct iphdr *ip_hdr;
+    struct tcphdr *tcp_hdr;
+    u8 *tcp_opts;
+
+    eth_hdr = (struct ethhdr *)data;
+    if (eth_hdr + 1 > (struct ethhdr *)data_end)
+        return XDP_ABORTED;
+    if_not (eth_hdr->h_proto == htons(ETH_P_IP))
+        return XDP_PASS;
+
+
+\end{verbatim}
+\end{frame}
+
+\begin{frame}[fragile]
+\frametitle{p0f -> XDP}
+\begin{verbatim}
+    ip_hdr = (struct iphdr *)(eth_hdr + 1);
+    if (ip_hdr + 1 > (struct iphdr *)data_end)
+        return XDP_ABORTED;
+    if_not (ip_hdr->daddr == htonl(0x1020304))
+        return XDP_PASS;
+    if_not (ip_hdr->version == 4)
+        return XDP_PASS;
+    if_not (ip_hdr->ttl <= 64)
+        return XDP_PASS;
+    if_not (ip_hdr->ttl > 29)
+        return XDP_PASS;
+    if_not (ip_hdr->ihl == 5)
+        return XDP_PASS;
+    if_not ((ip_hdr->frag_off & IP_DF) != 0)
+        return XDP_PASS;
+    if_not ((ip_hdr->frag_off & IP_MBZ) == 0)
+        return XDP_PASS;
+\end{verbatim}
+\end{frame}
+
+\begin{frame}[fragile]
+  \frametitle{p0f -> XDP}
+  \begin{verbatim}
+    tcp_hdr = (struct tcphdr*)((u8 *)ip_hdr +
+    ip_hdr->ihl * 4);
+    if (tcp_hdr + 1 > (struct tcphdr *)data_end)
+        return XDP_ABORTED;
+    if_not (tcp_hdr->dest == htons(1234))
+        return XDP_PASS;
+    if_not (tcp_hdr->doff == 10)
+        return XDP_PASS;
+    if_not ((htons(ip_hdr->tot_len) - (ip_hdr->ihl * 4) - (tcp_hdr->doff * 4)) == 0)
+        return XDP_PASS;
+
+    ...
+
+    return XDP_DROP;
+}
+  \end{verbatim}
+\end{frame}
+
+\begin{frame}{Attack Reaction/Mitigation}
+  \begin{itemize}
+    \item Once we have a p0f signature of a specific attack
+    \item Based on the signature generate an XDP program to drop the malicious traffic
+    \item Push it to a distributed KV store
+    \item Userspace daemon on each edge server that polls distributed KV store
+    \item Update the XDP program deployed
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Attack Reaction/Mitigation}
+  \begin{figure}
+    \includegraphics[width=0.9\textwidth]{./xdp_reaction.png}
+    \credit{\url{https://netdevconf.org/2.1/papers/Gilberto_Bertin_XDP_in_practice.pdf}}
+  \end{figure}
+\end{frame}
+\end{document}
