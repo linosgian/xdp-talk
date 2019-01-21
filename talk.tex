@@ -1,22 +1,46 @@
 \documentclass{beamer}
+\usetheme{Warsaw}
 \usepackage[T1]{fontenc}
 \usepackage{alltt}
 \usepackage{listings}
 \usepackage{graphicx}
+\AtBeginSection[]{
+  \begin{frame}
+  \vfill
+  \centering
+  \begin{beamercolorbox}[sep=8pt,center,shadow=true,rounded=true]{title}
+    \usebeamerfont{title}\insertsectionhead\par%
+  \end{beamercolorbox}
+  \vfill
+  \end{frame}
+}
+\setbeamertemplate{navigation symbols}{}
+\addtobeamertemplate{navigation symbols}{}{%
+    \usebeamerfont{footline}%
+    \usebeamercolor[fg]{footline}%
+    \hspace{1em}%
+    \insertframenumber/\inserttotalframenumber
+}
+\setbeamertemplate{headline}{}
 \makeatletter
 \def\verbatim@font{\footnotesize\ttfamily}
 \makeatother
 \newcommand{\credit}[1]{\par\hfill \tiny Credit:~\itshape#1}
 
 
-\usetheme{Warsaw}
-\title[XDP]{How to build a DDoS Mitigation Pipeline using XDP}
+\title[How to build a DDoS Mitigation Pipeline using XDP]{How to build a DDoS Mitigation Pipeline using XDP}
 \author{Linos Giannopoulos}
 \date{December 20, 2018}
 \begin{document}
 
 \begin{frame}
 \titlepage
+\end{frame}
+
+\begin{frame}[c]
+  \begin{figure}
+    \includegraphics[width=\textwidth]{./paper.png}
+  \end{figure}
 \end{frame}
 
 \begin{frame}{Agenda}
@@ -28,35 +52,48 @@
   \end{itemize}
 \end{frame}
 
+\section{cBPF}
 \begin{frame}{cBPF}
 Berkeley Packet Filter
 \begin{itemize}
 \item \textit{The BSD Packet Filter: A New Architecture for User-level Packet Capture}
-\item Avoid context switches between kernel and user space
+\item Avoid needless copying of packets
+\item Register-based VM in-kernel
 \item Filter packets as early as possible
 \end{itemize}
+\end{frame}
+
+\begin{frame}{cBPF}
+  \begin{figure}
+    \includegraphics[width=0.85\textwidth]{./cbpf.png}
+  \end{figure}
 \end{frame}
 
 \begin{frame}[fragile]
   \frametitle{cBPF}
   \begin{verbatim}
-# lgian[~] tcpdump -i eth1 ip and udp -d
-(000) ldh      [12]
-(001) jeq      #0x800      jt 2 jf 5
-(002) ldb      [23]
-(003) jeq      #0x11       jt 4 jf 5
-(004) ret      #262144
-(005) ret      #0
+# lgian[~] tcpdump -i any tcp -d
+(000) ldh      [14]
+(001) jeq      #0x86dd          jt 2 jf 7
+(002) ldb      [22]
+(003) jeq      #0x6             jt 10 jf 4
+(004) jeq      #0x2c            jt 5 jf 11
+(005) ldb      [56]
+(006) jeq      #0x6             jt 10 jf 11
+(007) jeq      #0x800           jt 8  jf 11
+(008) ldb      [25]
+(009) jeq      #0x6             jt 10 jf 11
+(010) ret      #262144
+(011) ret      #0
 
 # lgian[~] strace -e trace=setsockopt tcpdump -i any tcp
 ...
-setsockopt(3, SOL_SOCKET, SO_ATTACH_FILTER,
-  {len=1, filter=0x7f0264d65000}, 16) = 0
-setsockopt(3, SOL_SOCKET, SO_ATTACH_FILTER,
-  {len=12, filter=0x55e81a792dd0}, 16) = 0
+  setsockopt(3, SOL_SOCKET, SO_ATTACH_FILTER, 
+    {len=12, filter=0x5630ba569dd0}, 16) = 0
   \end{verbatim}
 \end{frame}
 
+\section{eBPF}
 \begin{frame}{eBPF}
   What changed
   \begin{itemize}
@@ -70,6 +107,32 @@ setsockopt(3, SOL_SOCKET, SO_ATTACH_FILTER,
     \item eBPF Maps shared between user and kernel space
     \item eBPF Verifier
   \end{itemize}
+\end{frame}
+
+\begin{frame}{eBPF Map Types}
+  \begin{columns}
+    \begin{column}{0.5\textwidth}
+      \begin{itemize}
+        \item Hash
+        \item Array
+        \item Tail Call Array
+        \item Per-CPU Hash/Array
+        \item Stack Trace
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.5\textwidth}
+        \begin{center}
+          \begin{itemize}
+            \item LRU (per-CPU) Hash
+            \item Longest-Prefix Matching Trie
+            \item Array/Hash of Maps
+            \item Net device Map
+            \item Socket Map
+            \item ...
+          \end{itemize}
+        \end{center}
+    \end{column}
+  \end{columns}
 \end{frame}
 
 \begin{frame}{eBPF Verifier}
@@ -90,8 +153,30 @@ setsockopt(3, SOL_SOCKET, SO_ATTACH_FILTER,
   \item Cannot read uninitialized registers
   \item Cannot read any arbitrary memory
   \item No out-of-bounds jumps
-  \item etc.
+  \item Everything needs to be inlined (no function calls or shared library calls)
+  \item Only calls to BPF Helpers ( BPF to BPF is also allowed on newer kernel versions )
   \end{itemize}
+\end{frame}
+
+\begin{frame}[fragile]
+  \frametitle{(some) eBPF Helper Functions}
+  \textit{uapi/linux/bpf.h~}
+  \begin{verbatim}
+  #define __BPF_FUNC_MAPPER(FN)   \
+    FN(map_lookup_elem),    \
+    FN(map_update_elem),    \
+    FN(map_delete_elem),    \
+    ...
+    FN(ktime_get_ns),   \
+    FN(trace_printk),   \
+    FN(get_prandom_u32),    \
+    FN(skb_store_bytes),    \
+    FN(l3_csum_replace),    \
+    FN(tail_call),      \
+    FN(xdp_adjust_head),    \
+    FN(xdp_adjust_meta),    \
+    ...
+\end{verbatim}
 \end{frame}
 
 \begin{frame}{eBPF}
@@ -104,26 +189,19 @@ setsockopt(3, SOL_SOCKET, SO_ATTACH_FILTER,
   \footnotetext[1]{\url{https://www.youtube.com/watch?v=w8nFRoFJ6EQ}}
 \end{frame}
 
-% \begin{frame}[fragile]
-%   \frametitle{eBPF Map Types}
-%   \begin{itemize}
-%     \item BPF\_MAP\_TYPE\_HASH: a hash table
-%     \item BPF\_MAP\_TYPE\_ARRAY: an array map, optimized for fast lookup speeds, often used for counters
-%     \item BPF\_MAP\_TYPE\_PERCPU\_ARRAY: a per-CPU array, used to implement histograms of latency
-%     \item BPF\_MAP\_TYPE\_PERCPU\_HASH: a per-CPU hash table
-%   \end{itemize}
-% \end{frame}
-
+\section{XDP}
 \begin{frame}{XDP}
   eXpress Data Path
   \begin{itemize}
     \item High-performance packet processing
-    \item Runs eBPF programs at the earliest possible* point (sk\_buffer metadata structure)
+    \item Runs eBPF programs at the earliest possible point (before sk\_buffer allocations)
     \item In concert with the kernel (no userspace bypass or out-of-tree kernel modifications)
-    \item Driver dependant (only several NIC drivers support it)
-    \item Verdicts: aborted, drop, pass, tx
+    \item Driver dependant
+    \item Verdicts: XDP\_DROP, XDP\_PASS, XDP\_TX, XDP\_ABORTED, XDP\_REDIRECT
   \end{itemize}
+\end{frame}
 
+\begin{frame}{XDP}
   Use cases:
   \begin{itemize}
     \item Firewalling (Cillium\footnotemark[1])
@@ -165,6 +243,7 @@ setsockopt(3, SOL_SOCKET, SO_ATTACH_FILTER,
 \begin{frame}{XDP Load Program}
   \begin{figure}
     \includegraphics[width=0.85\textwidth]{./xdp_workflow.png}
+
   \end{figure}
 \end{frame}
 
@@ -172,7 +251,7 @@ setsockopt(3, SOL_SOCKET, SO_ATTACH_FILTER,
   \begin{itemize}
     \item Write C Program
     \item clang -O2 -target bpf -c xdp.c -o xdp.o
-    \item ip link set dev eth0 xdpgeneric obj xdp.o sec <section-name>
+    \item ip link set dev eth0 (xdpgeneric|xdpdrv|xdpoffload) obj xdp.o sec <section-name>
   \end{itemize}
 \end{frame}
 
@@ -185,9 +264,9 @@ setsockopt(3, SOL_SOCKET, SO_ATTACH_FILTER,
   \begin{itemize}
     \item 10GbE Intel NIC
     \item 14Mpps tiny UDP packets 
-    \item Traffic is directed towards a single CPU
-    \item Measure number of packets handled by the kernel on that CPU
     \item Randomized source IP/Port
+    \item Traffic is steered towards a single CPU
+    \item Measure number of packets handled by the kernel on that CPU
   \end{itemize}
 
   \ \\
@@ -207,6 +286,7 @@ setsockopt(3, SOL_SOCKET, SO_ATTACH_FILTER,
   \end{figure}
 \end{frame}
 
+\section{XDP}
 \begin{frame}{Overview of Pipeline}
   \begin{itemize}
     \item Traffic sampling
@@ -216,12 +296,32 @@ setsockopt(3, SOL_SOCKET, SO_ATTACH_FILTER,
   \end{itemize}
 \end{frame}
 
+\begin{frame}{Some things to note}
+  \begin{itemize}
+    \item DDoS Attacks that our uplink can handle
+    \item If that's not the case:
+      \begin{itemize}
+        \item Anycast with different PoPs
+        \item Flowspec
+      \end{itemize}
+    \item Flowspec has its limitations
+    \item Software and not hardware limitations
+  \end{itemize}
+\end{frame}
+
 \begin{frame}{Traffic sampling}
   In contrast with an IDS, sampling instead of working on the whole traffic is crucial here.
   \begin{itemize}
-    \item Some improvements are suggested in this area, but nothing concrete
-    \item Use \textit{NFLOG}
+    \item Use \textit{NFLOG (+Statistic)}
     \item Userspace daemon and Sflow packets to central server
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Traffic sampling}
+  The problem with the above is that you have no visibility in the dropped traffic
+  \begin{itemize}
+    \item Once a packet arrives use \textit{xdp\_event\_output} to copy packet to a perf event ring buffer
+    \item Then use a userspace daemon to obtain the packet
   \end{itemize}
 \end{frame}
 
@@ -246,6 +346,8 @@ setsockopt(3, SOL_SOCKET, SO_ATTACH_FILTER,
 \begin{frame}[fragile]
 \frametitle{p0f -> XDP}
 \begin{verbatim}
+$ ./p0f2ebpf.py --ip 1.2.3.4 --port 1234 
+    '4:64:0:*:mss*10,6:mss,sok,ts,nop,ws:df,id+:0'
 
 static inline int match_p0f(void *data, void *data_end) {
     struct ethhdr *eth_hdr;
@@ -322,5 +424,17 @@ static inline int match_p0f(void *data, void *data_end) {
     \includegraphics[width=0.9\textwidth]{./xdp_reaction.png}
     \credit{\url{https://netdevconf.org/2.1/papers/Gilberto_Bertin_XDP_in_practice.pdf}}
   \end{figure}
+\end{frame}
+
+\begin{frame}
+  \begin{center}
+    \Huge Thank you!
+  \end{center}
+\end{frame}
+
+\begin{frame}
+  \begin{center}
+    \Huge Questions?
+  \end{center}
 \end{frame}
 \end{document}
