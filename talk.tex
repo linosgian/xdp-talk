@@ -4,6 +4,8 @@
 \usepackage{alltt}
 \usepackage{listings}
 \usepackage{graphicx}
+\usepackage{perpage}[footmisc] %the perpage package
+\MakePerPage{footnote}
 \AtBeginSection[]{
   \begin{frame}
   \vfill
@@ -28,9 +30,9 @@
 \newcommand{\credit}[1]{\par\hfill \tiny Credit:~\itshape#1}
 
 
-\title[How to build a DDoS Mitigation Pipeline using XDP]{How to build a DDoS Mitigation Pipeline using XDP}
+\title[XDP]{XDP}
 \author{Linos Giannopoulos}
-\date{December 20, 2018}
+\date{March 28, 2019}
 \begin{document}
 
 \begin{frame}
@@ -69,29 +71,29 @@ Berkeley Packet Filter
   \end{figure}
 \end{frame}
 
-\begin{frame}[fragile]
-  \frametitle{cBPF}
-  \begin{verbatim}
-# lgian[~] tcpdump -i any tcp -d
-(000) ldh      [14]
-(001) jeq      #0x86dd          jt 2 jf 7
-(002) ldb      [22]
-(003) jeq      #0x6             jt 10 jf 4
-(004) jeq      #0x2c            jt 5 jf 11
-(005) ldb      [56]
-(006) jeq      #0x6             jt 10 jf 11
-(007) jeq      #0x800           jt 8  jf 11
-(008) ldb      [25]
-(009) jeq      #0x6             jt 10 jf 11
-(010) ret      #262144
-(011) ret      #0
+% \begin{frame}[fragile]
+%   \frametitle{cBPF}
+%   \begin{verbatim}
+% # lgian[~] tcpdump -i any tcp -d
+% (000) ldh      [14]
+% (001) jeq      #0x86dd          jt 2 jf 7
+% (002) ldb      [22]
+% (003) jeq      #0x6             jt 10 jf 4
+% (004) jeq      #0x2c            jt 5 jf 11
+% (005) ldb      [56]
+% (006) jeq      #0x6             jt 10 jf 11
+% (007) jeq      #0x800           jt 8  jf 11
+% (008) ldb      [25]
+% (009) jeq      #0x6             jt 10 jf 11
+% (010) ret      #262144
+% (011) ret      #0
 
-# lgian[~] strace -e trace=setsockopt tcpdump -i any tcp
-...
-  setsockopt(3, SOL_SOCKET, SO_ATTACH_FILTER, 
-    {len=12, filter=0x5630ba569dd0}, 16) = 0
-  \end{verbatim}
-\end{frame}
+% # lgian[~] strace -e trace=setsockopt tcpdump -i any tcp
+% ...
+%   setsockopt(3, SOL_SOCKET, SO_ATTACH_FILTER, 
+%     {len=12, filter=0x5630ba569dd0}, 16) = 0
+%   \end{verbatim}
+% \end{frame}
 
 \section{eBPF}
 \begin{frame}{eBPF}
@@ -190,6 +192,12 @@ Berkeley Packet Filter
 \end{frame}
 
 \section{XDP}
+\begin{frame}{Receiving a packet}
+  \begin{figure}
+    \includegraphics[width=0.85\textwidth]{./dma-nic.jpg}
+
+  \end{figure}
+\end{frame}
 \begin{frame}{XDP}
   eXpress Data Path
   \begin{itemize}
@@ -247,13 +255,13 @@ Berkeley Packet Filter
   \end{figure}
 \end{frame}
 
-\begin{frame}{XDP Load Program}
-  \begin{itemize}
-    \item Write C Program
-    \item clang -O2 -target bpf -c xdp.c -o xdp.o
-    \item ip link set dev eth0 (xdpgeneric|xdpdrv|xdpoffload) obj xdp.o sec <section-name>
-  \end{itemize}
-\end{frame}
+% \begin{frame}{XDP Load Program}
+%   \begin{itemize}
+%     \item Write C Program
+%     \item clang -O2 -target bpf -c xdp.c -o xdp.o
+%     \item ip link set dev eth0 (xdpgeneric|xdpdrv|xdpoffload) obj xdp.o sec <section-name>
+%   \end{itemize}
+% \end{frame}
 
 \begin{frame}{XDP vs Everything}
   \Large{What about IPtables?}
@@ -263,7 +271,7 @@ Berkeley Packet Filter
   Test bench
   \begin{itemize}
     \item 10GbE Intel NIC
-    \item 14Mpps tiny UDP packets 
+    \item Generate 14Mpps tiny UDP packets (pktgen)
     \item Randomized source IP/Port
     \item Traffic is steered towards a single CPU
     \item Measure number of packets handled by the kernel on that CPU
@@ -286,13 +294,31 @@ Berkeley Packet Filter
   \end{figure}
 \end{frame}
 
-\section{XDP}
+\begin{frame}{GRNET's testbed}
+  \begin{figure}
+    \includegraphics[width=1\textwidth]{./testbench.png}
+  \end{figure}
+\end{frame}
+
+\begin{frame}{Our results}
+  \begin{figure}
+    \includegraphics[width=1.1\textwidth]{./custom_no_xdp.png}
+  \end{figure}
+\end{frame}
+
+\begin{frame}{Our results}
+
+  \begin{figure}
+    \includegraphics[width=1.1\textwidth]{./custom_xdp.png}
+  \end{figure}
+\end{frame}
+
+\section{DDoS Pipeline}
 \begin{frame}{Overview of Pipeline}
   \begin{itemize}
     \item Traffic sampling
     \item Traffic aggregation and analysis
     \item Attack reaction
-    \item Attack mitigation
   \end{itemize}
 \end{frame}
 
@@ -313,15 +339,17 @@ Berkeley Packet Filter
   In contrast with an IDS, sampling instead of working on the whole traffic is crucial here.
   \begin{itemize}
     \item Use \textit{NFLOG (+Statistic)}
-    \item Userspace daemon and Sflow packets to central server
+    \item Userspace daemon to process packet
   \end{itemize}
+  \pause
+    \textit{Issue:} no visibility in the dropped traffic
 \end{frame}
 
 \begin{frame}{Traffic sampling}
-  The problem with the above is that you have no visibility in the dropped traffic
+  Sample before drop rules - in XDP
   \begin{itemize}
-    \item Once a packet arrives use \textit{xdp\_event\_output} to copy packet to a perf event ring buffer
-    \item Then use a userspace daemon to obtain the packet
+    \item Copy sampled packet to perf event buffer (xdp\_event\_output)
+    \item Userspace daemon to obtain the packet
   \end{itemize}
 \end{frame}
 
@@ -409,32 +437,41 @@ static inline int match_p0f(void *data, void *data_end) {
   \end{verbatim}
 \end{frame}
 
-\begin{frame}{Attack Reaction/Mitigation}
-  \begin{itemize}
-    \item Once we have a p0f signature of a specific attack
-    \item Based on the signature generate an XDP program to drop the malicious traffic
-    \item Push it to a distributed KV store
-    \item Userspace daemon on each edge server that polls distributed KV store
-    \item Update the XDP program deployed
-  \end{itemize}
-\end{frame}
-
-\begin{frame}{Attack Reaction/Mitigation}
+\begin{frame}{Pipeline}
   \begin{figure}
-    \includegraphics[width=0.9\textwidth]{./xdp_reaction.png}
-    \credit{\url{https://netdevconf.org/2.1/papers/Gilberto_Bertin_XDP_in_practice.pdf}}
+    \includegraphics[width=\linewidth]{./ddos.png}
   \end{figure}
 \end{frame}
 
-\begin{frame}
-  \begin{center}
-    \Huge Thank you!
-  \end{center}
+\begin{frame}{A more realistic test}
+  \begin{itemize}
+    \item Generate ~8.7Mpps\footnotemark TCP SYN packets (trafgen)
+    \item Randomized source IP/Port
+    \item Traffic is steered towards a single CPU
+    \item Measure number of packets handled by the kernel on that CPU
+  \end{itemize}
+  \footnotetext[1]{We can do better!}
 \end{frame}
 
-\begin{frame}
+\begin{frame}{A more realistic test}
+  Methodology:
+  \begin{itemize}
+    \item Sample traffic
+    \item Feed samples to p0f
+    \item Grab signature
+    \item Generate XDP program to drop the malicious traffic
+    \item Attach it to XDP hook
+  \end{itemize}
+\end{frame}
+
+\begin{frame}[plain]
+        \makebox[\linewidth]{\includegraphics[width=\paperwidth]{./trafgen.png}}
+\end{frame}
+
+\begin{frame}{}
   \begin{center}
     \Huge Questions?
   \end{center}
+
 \end{frame}
 \end{document}
